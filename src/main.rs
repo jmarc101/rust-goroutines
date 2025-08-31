@@ -1,15 +1,17 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Condvar, LazyLock, Mutex},
     thread,
 };
 
+static SCHEDULER: LazyLock<Arc<Scheduler>> = LazyLock::new(|| Scheduler::new(4));
+
+pub fn scheduler() -> Arc<Scheduler> {
+    SCHEDULER.clone()
+}
+
 type Task = Box<dyn FnOnce() + Send + 'static>;
 type Queue = Arc<(Mutex<VecDeque<Task>>, Condvar)>;
-
-struct Worker {
-    queue: Queue,
-}
 
 pub struct Scheduler {
     queues: Arc<Mutex<Vec<Queue>>>,
@@ -74,11 +76,21 @@ impl Scheduler {
 
         Arc::new(Self { workers, queues })
     }
+
+    pub fn enqueue(&self, task: Task) {
+        let queues = self.queues.lock().unwrap();
+        let q = queues[0].clone();
+
+        let (lock, cv) = &*q;
+        let mut guard = lock.lock().unwrap();
+        guard.push_back(task);
+        cv.notify_one();
+    }
 }
 
 macro_rules! go {
     ($body:expr) => {
-        thread::spawn(move || $body)
+        scheduler().enqueue(Box::new(move || $body))
     };
 }
 
@@ -94,16 +106,17 @@ fn main() {
 
     let go_name = name.clone();
     // Spawn a "goroutine-like" thread
-    let handle = go!({
+    go!({
         println!(
             "Hello from goroutine-like thread: {} is {} years old",
             go_name, age
         );
     });
 
-    go!(add(1, 2));
+    go!({
+        add(1, 2);
+        return;
+    });
 
     println!("{}", name);
-
-    handle.join().unwrap();
 }
